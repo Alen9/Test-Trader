@@ -1,0 +1,19 @@
+{
+  "params": {
+    "fast": 8,
+    "slow": 60,
+    "rsi_period": 14,
+    "rsi_low": 40,
+    "rsi_high": 90,
+    "trend": 100,
+    "stop_loss": 0.02,
+    "take_profit": 0.12
+  },
+  "in_position": true,
+  "entry": 124285.93666610714,
+  "qty": 0.008046,
+  "equity_est": 10000.0,
+  "peak": 10000.0,
+  "halted": false,
+  "last_relearn": "2026-08-30T06:45:57.978656+00:00"
+}
