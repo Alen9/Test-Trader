@@ -1,0 +1,232 @@
+"""
+tick.py  -  ONE run of the adaptive bot. Designed for GitHub Actions.
+
+Each time it runs it:
+  1. loads its memory from state.json,
+  2. fetches recent candles (Binance TESTNET),
+  3. every `--relearn-hours` re-optimises + validates on unseen data (the "learning"),
+  4. only trades if that unseen slice showed a real edge, else holds cash,
+  5. respects a drawdown kill switch,
+  6. saves state.json and appends to trades_log.csv, then exits.
+
+A GitHub Actions workflow calls this every hour, so the bot "runs on its own"
+in GitHub's cloud with your phone only used to edit files.
+
+Test safely first (no keys, no orders):
+    python tick.py --dry-run
+
+TESTNET ONLY. Cannot touch real funds as written. Does not guarantee profit.
+"""
+
+import argparse
+import json
+import os
+import random
+from datetime import datetime, timezone
+
+import numpy as np
+import pandas as pd
+
+STATE_FILE = "state.json"
+LOG_FILE = "trades_log.csv"
+
+# ---- search space (edit to taste) ----
+PARAM_SPACE = {
+    "fast": [8, 12, 20, 30], "slow": [40, 60, 100, 150], "rsi_period": [14],
+    "rsi_low": [40, 45, 50], "rsi_high": [70, 80, 90], "trend": [100, 200],
+    "stop_loss": [0.02, 0.03, 0.05], "take_profit": [0.03, 0.05, 0.08, 0.12],
+}
+PPY = {"1m": 525600, "5m": 105120, "15m": 35040, "1h": 8760, "4h": 2190, "1d": 365}
+
+
+# ------------------------- indicators & signals -------------------------
+def ema(s, p): return s.ewm(span=p, adjust=False).mean()
+def sma(s, p): return s.rolling(p).mean()
+
+def rsi(s, p=14):
+    d = s.diff(); up = d.clip(lower=0); dn = -d.clip(upper=0)
+    ag = up.ewm(alpha=1/p, adjust=False).mean(); al = dn.ewm(alpha=1/p, adjust=False).mean()
+    return (100 - 100/(1 + ag/al.replace(0, np.nan))).fillna(50.0)
+
+def compute_signals(df, p):
+    c = df["close"]
+    long_ok = (ema(c, p["fast"]) > ema(c, p["slow"])) & \
+              (rsi(c, p["rsi_period"]).between(p["rsi_low"], p["rsi_high"])) & \
+              (c > sma(c, p["trend"]))
+    exit_sig = ema(c, p["fast"]) < ema(c, p["slow"])
+    return long_ok.fillna(False).to_numpy(), exit_sig.fillna(False).to_numpy()
+
+
+# ------------------------- backtest & metrics -------------------------
+def backtest(df, p, fee=0.001, slip=0.0005, cash0=10_000.0):
+    long_ok, exit_sig = compute_signals(df, p)
+    close, high, low = df["close"].to_numpy(), df["high"].to_numpy(), df["low"].to_numpy()
+    warmup = max(p["slow"], p["trend"], p["rsi_period"]) + 2
+    cash, qty, basis, entry, pos = cash0, 0.0, 0.0, 0.0, False
+    eq, trades = np.empty(len(df)), []
+    sl, tp = p["stop_loss"], p["take_profit"]
+    for i in range(len(df)):
+        px = close[i]
+        if pos:
+            hit, fill = False, px
+            if low[i] <= entry*(1-sl): hit, fill = True, entry*(1-sl)
+            elif high[i] >= entry*(1+tp): hit, fill = True, entry*(1+tp)
+            elif exit_sig[i]: hit = True
+            if hit:
+                cash = qty*fill*(1-slip)*(1-fee); trades.append(cash-basis)
+                qty, pos = 0.0, False
+        elif i >= warmup and long_ok[i]:
+            entry = px*(1+slip); qty = cash*(1-fee)/entry; basis = cash; cash, pos = 0.0, True
+        eq[i] = cash + qty*px
+    if pos:
+        cash = qty*close[-1]*(1-slip)*(1-fee); trades.append(cash-basis); eq[-1] = cash
+    return eq, trades
+
+def metrics(eq, trades, ppy):
+    eq = np.asarray(eq, float); r = np.diff(eq)/eq[:-1]
+    t = np.asarray(trades, float); n = len(t)
+    win = t[t > 0]; loss = t[t < 0]; gl = -loss.sum()
+    return {"total_return": eq[-1]/eq[0]-1,
+            "sharpe": (r.mean()/r.std()*np.sqrt(ppy)) if r.std() > 0 else 0.0,
+            "win_rate": len(win)/n if n else 0.0,
+            "profit_factor": (win.sum()/gl) if gl > 0 else (float("inf") if n else 0.0),
+            "n_trades": n}
+
+def sample(space, rng):
+    while True:
+        p = {k: rng.choice(v) for k, v in space.items()}
+        if p["fast"] < p["slow"]: return p
+
+def optimize(df, ppy, samples, rng):
+    best, score = None, -1e18
+    for _ in range(samples):
+        p = sample(PARAM_SPACE, rng)
+        m = metrics(*backtest(df, p), ppy)
+        s = m["sharpe"] if m["n_trades"] >= 8 else -1e9
+        if s > score: best, score = {"params": p, "metrics": m}, s
+    return best
+
+
+# ------------------------- data -------------------------
+def synthetic(n=2200, seed=None):
+    rng = np.random.default_rng(seed)
+    r = np.zeros(n)
+    for i in range(1, n): r[i] = 0.8*r[i-1] + rng.normal(0, 0.006)
+    c = 30000*np.exp(np.cumsum(r)); o = np.concatenate([[c[0]], c[:-1]])
+    w = np.abs(rng.normal(0, 0.004, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    return pd.DataFrame({"open": o, "high": np.maximum(o, c)*(1+w),
+                         "low": np.minimum(o, c)*(1-w), "close": c, "volume": 1.0}, index=idx)
+
+def fetch_live(symbol, timeframe, limit):
+    import ccxt
+    ex = ccxt.binance({"apiKey": os.getenv("BINANCE_KEY"),
+                       "secret": os.getenv("BINANCE_SECRET"), "enableRateLimit": True})
+    ex.set_sandbox_mode(True)  # TESTNET
+    ex.load_markets()
+    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
+    df.index = pd.to_datetime(df["ts"], unit="ms")
+    return ex, df[["open", "high", "low", "close", "volume"]].astype(float)
+
+
+# ------------------------- state & logging -------------------------
+def load_state():
+    if os.path.exists(STATE_FILE):
+        return json.load(open(STATE_FILE))
+    return {"params": None, "in_position": False, "entry": 0.0, "qty": 0.0,
+            "equity_est": 10_000.0, "peak": 10_000.0, "halted": False, "last_relearn": None}
+
+def save_state(s): json.dump(s, open(STATE_FILE, "w"), indent=2)
+
+def log(event, detail):
+    new = not os.path.exists(LOG_FILE)
+    with open(LOG_FILE, "a") as f:
+        if new: f.write("time,event,detail\n")
+        f.write(f"{datetime.now(timezone.utc).isoformat()},{event},{detail}\n")
+    print(f"{event}: {detail}")
+
+
+# ------------------------- one tick -------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbol", default="BTC/USDT")
+    ap.add_argument("--timeframe", default="1h")
+    ap.add_argument("--quote", type=float, default=1000.0)
+    ap.add_argument("--relearn-hours", type=int, default=48)
+    ap.add_argument("--lookback", type=int, default=1200)
+    ap.add_argument("--oos", type=int, default=300)
+    ap.add_argument("--samples", type=int, default=200)
+    ap.add_argument("--min-pf", type=float, default=1.05)
+    ap.add_argument("--max-drawdown", type=float, default=0.20)
+    ap.add_argument("--dry-run", action="store_true", help="synthetic data, no keys, no orders")
+    args = ap.parse_args()
+
+    s = load_state()
+    ppy = PPY.get(args.timeframe, 8760)
+    need = args.lookback + args.oos + 5
+
+    if args.dry_run:
+        ex, df = None, synthetic(n=need)
+    else:
+        ex, df = fetch_live(args.symbol, args.timeframe, min(need, 1000))
+
+    price = float(df["close"].iloc[-1])
+    now = datetime.now(timezone.utc)
+
+    # ---- re-learn on schedule (the adaptive part) ----
+    due = s["last_relearn"] is None or \
+        (now - datetime.fromisoformat(s["last_relearn"])).total_seconds() >= args.relearn_hours*3600
+    if due and len(df) >= args.lookback + args.oos:
+        rng = random.Random(int(now.timestamp()))
+        best = optimize(df.iloc[-(args.lookback+args.oos):-args.oos], ppy, args.samples, rng)
+        v = metrics(*backtest(df.iloc[-args.oos:], best["params"]), ppy) if best else None
+        armed = bool(v and v["total_return"] > 0 and v["n_trades"] >= 8
+                     and v["profit_factor"] >= args.min_pf)
+        s["last_relearn"] = now.isoformat()
+        if armed:
+            s["params"] = best["params"]
+            log("relearn", f"edge validated oos={v['total_return']*100:+.1f}% -> armed")
+        else:
+            if s["in_position"] and not args.dry_run:
+                ex.create_market_sell_order(args.symbol, s["qty"])
+            s["in_position"], s["qty"], s["params"] = False, 0.0, None
+            log("relearn", f"no edge (oos={v['total_return']*100:.1f}%) -> CASH" if v else "no data -> CASH")
+
+    # ---- drawdown kill switch ----
+    mtm = s["equity_est"] + (s["qty"]*(price-s["entry"]) if s["in_position"] else 0.0)
+    s["peak"] = max(s["peak"], mtm)
+    if not s["halted"] and mtm <= s["peak"]*(1-args.max_drawdown):
+        s["halted"] = True
+        if s["in_position"] and not args.dry_run:
+            ex.create_market_sell_order(args.symbol, s["qty"])
+        s["in_position"], s["qty"] = False, 0.0
+        log("HALT", f"drawdown limit hit at ${mtm:,.0f}; no new entries")
+
+    # ---- act on the latest candle ----
+    if s["params"] and not s["halted"]:
+        long_ok, exit_sig = compute_signals(df, s["params"])
+        i = len(df)-1; p = s["params"]
+        if s["in_position"]:
+            hit_sl = price <= s["entry"]*(1-p["stop_loss"])
+            hit_tp = price >= s["entry"]*(1+p["take_profit"])
+            if hit_sl or hit_tp or exit_sig[i]:
+                if not args.dry_run: ex.create_market_sell_order(args.symbol, s["qty"])
+                s["equity_est"] += s["qty"]*(price-s["entry"])
+                s["in_position"], s["qty"] = False, 0.0
+                log("sell", f"@~{price:.2f} ({'stop' if hit_sl else 'target' if hit_tp else 'trend'})")
+        elif long_ok[i]:
+            s["qty"] = round(args.quote/price, 6)
+            if not args.dry_run: ex.create_market_buy_order(args.symbol, s["qty"])
+            s["entry"], s["in_position"] = price, True
+            log("buy", f"{s['qty']} @~{price:.2f}")
+        else:
+            log("hold", f"armed, no entry signal (px {price:.2f})")
+    else:
+        log("cash", f"no validated edge or halted (px {price:.2f})")
+
+    save_state(s)
+
+
+if __name__ == "__main__":
+    main()
