@@ -106,7 +106,8 @@ def optimize(df, ppy, samples, rng):
 def fill_buy(asks, quote_amount):
     """Walk the asks spending `quote_amount` USD -> (avg_price, qty)."""
     spent, qty, last = 0.0, 0.0, (asks[-1][0] if asks else 0.0)
-    for price, amount in asks:
+    for level in asks:
+        price, amount = level[0], level[1]
         last = price
         remaining = quote_amount - spent
         if remaining <= 0: break
@@ -123,7 +124,8 @@ def fill_buy(asks, quote_amount):
 def fill_sell(bids, qty_to_sell):
     """Walk the bids selling `qty_to_sell` -> (avg_price, usd_received)."""
     got, sold, last = 0.0, 0.0, (bids[-1][0] if bids else 0.0)
-    for price, amount in bids:
+    for level in bids:
+        price, amount = level[0], level[1]
         last = price
         take = min(amount, qty_to_sell - sold)
         got += take * price; sold += take
