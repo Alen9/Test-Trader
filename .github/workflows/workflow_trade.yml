@@ -1,8 +1,8 @@
 name: adaptive-trader
 
 on:
-  schedule:
-    - cron: '5 * * * *'        # every hour, at :05
+    schedule:
+        - cron: '*/15 * * * *' # every hour, at :05
   workflow_dispatch:            # run manually from your phone
     inputs:
       dry_run:
