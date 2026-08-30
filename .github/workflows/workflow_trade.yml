@@ -1,9 +1,9 @@
 name: adaptive-trader
 
 on:
-    schedule:
-        - cron: '*/15 * * * *' # every hour, at :05
-  workflow_dispatch:            # run manually from your phone
+  schedule:
+    - cron: '*/15 * * * *'      # every 15 minutes (GitHub may still delay it)
+  workflow_dispatch:            # manual run button (always reliable)
     inputs:
       dry_run:
         description: 'Dry run (offline synthetic data)'
@@ -11,7 +11,7 @@ on:
         default: false
 
 permissions:
-  contents: write               # needed to save state + dashboard back to the repo
+  contents: write
 
 concurrency:
   group: trader
