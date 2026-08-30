@@ -1,0 +1,33 @@
+# Bot status  —  updated 2026-08-30 06:56 UTC
+
+🟡 **Armed, waiting** for an entry signal
+
+## Overall
+- Equity now: **$9,322.39**  (started $10,000.00)
+- Total since start: 🔴 **-6.78%**  _(testnet, estimated)_
+- Closed trades: **1**  |  wins: **0** (0%)  |  realized P/L: **$-677.61**
+
+## Currently trading these settings
+```json
+{
+  "fast": 8,
+  "slow": 60,
+  "rsi_period": 14,
+  "rsi_low": 40,
+  "rsi_high": 90,
+  "trend": 100,
+  "stop_loss": 0.02,
+  "take_profit": 0.12
+}
+```
+
+## Recent trades
+| Exit time | Entry | Exit | P/L % | P/L $ | Why |
+|---|---|---|---|---|---|
+| 2026-08-30 06:56 | 124285.94 | 40069.23 | 🔴 -67.76% | -677.61 | stop |
+
+## Equity chart
+![equity](equity.png)
+
+---
+_Binance **testnet** (fake money). Equity is an internal estimate. This bot adapts but does **not** guarantee profit — it's a learning run._
