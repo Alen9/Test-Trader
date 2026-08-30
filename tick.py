@@ -1,15 +1,17 @@
 """
 tick.py  -  ONE run of the adaptive bot. Designed for GitHub Actions.
 
-Each run: load memory (state.json) -> fetch candles (Binance TESTNET) ->
-re-learn on schedule (validate on unseen data) -> trade only with a validated
-edge, else hold cash -> drawdown kill switch -> record trade + equity -> save.
+Runs entirely in the cloud with NO exchange keys: it pulls real prices from
+Kraken (which, unlike Binance, doesn't block data-center IPs) and PAPER-TRADES
+them - simulating fills internally. Still fake money, still adaptive; every
+trade is recorded so report.py can show it in STATUS.md.
 
-Writes: state.json, trades_log.csv (raw events), trades.csv (closed trades),
-equity_history.csv (equity snapshots). report.py turns these into STATUS.md.
+Each run: load memory (state.json) -> fetch real candles -> re-learn on schedule
+(validate on unseen data) -> trade only with a validated edge, else hold cash ->
+drawdown kill switch -> record trade + equity -> save.
 
-Test safely first (no keys, no orders):  python tick.py --dry-run
-TESTNET ONLY. Cannot touch real funds as written. Does not guarantee profit.
+Test offline first:  python tick.py --dry-run
+This is a simulation. No real money is involved and profit is not guaranteed.
 """
 
 import argparse
@@ -103,7 +105,7 @@ def optimize(df, ppy, samples, rng):
 
 
 # ------------------------- data -------------------------
-def synthetic(n=2200, seed=None):
+def synthetic(n=800, seed=None):
     rng = np.random.default_rng(seed)
     r = np.zeros(n)
     for i in range(1, n): r[i] = 0.8*r[i-1] + rng.normal(0, 0.006)
@@ -113,24 +115,19 @@ def synthetic(n=2200, seed=None):
     return pd.DataFrame({"open": o, "high": np.maximum(o, c)*(1+w),
                          "low": np.minimum(o, c)*(1-w), "close": c, "volume": 1.0}, index=idx)
 
-def fetch_live(symbol, timeframe, limit):
+def fetch_data(symbol, timeframe):
+    """Real OHLCV from Kraken (public, no keys, not geoblocked on cloud IPs)."""
     import ccxt
-    ex = ccxt.binance({"apiKey": os.getenv("BINANCE_KEY"),
-                       "secret": os.getenv("BINANCE_SECRET"), "enableRateLimit": True})
-    ex.set_sandbox_mode(True)  # TESTNET
-    ex.load_markets()
-    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    ex = ccxt.kraken({"enableRateLimit": True})
+    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe)   # Kraken returns up to ~720 bars
     df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
     df.index = pd.to_datetime(df["ts"], unit="ms")
-    return ex, df[["open", "high", "low", "close", "volume"]].astype(float)
+    return df[["open", "high", "low", "close", "volume"]].astype(float)
 
 
 # ------------------------- state, logging, records -------------------------
 def load_state():
-    if os.path.exists(STATE_FILE):
-        s = json.load(open(STATE_FILE))
-    else:
-        s = {}
+    s = json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {}
     s.setdefault("params", None); s.setdefault("in_position", False)
     s.setdefault("entry", 0.0); s.setdefault("qty", 0.0)
     s.setdefault("entry_time", None); s.setdefault("equity_est", 10_000.0)
@@ -160,9 +157,7 @@ def record_equity(now, equity, price, in_pos):
         if new: f.write("time,equity,price,in_position\n")
         f.write(f"{now.isoformat()},{equity:.2f},{price:.2f},{int(in_pos)}\n")
 
-def close_position(s, price, reason, now, dry_run, ex, symbol):
-    if not dry_run and ex is not None:
-        ex.create_market_sell_order(symbol, s["qty"])
+def close_position(s, price, reason, now):
     pnl = s["qty"] * (price - s["entry"])
     pnl_pct = (price / s["entry"] - 1) * 100 if s["entry"] else 0.0
     s["equity_est"] += pnl
@@ -175,26 +170,29 @@ def close_position(s, price, reason, now, dry_run, ex, symbol):
 # ------------------------- one tick -------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbol", default="BTC/USDT")
+    ap.add_argument("--symbol", default="BTC/USD")     # Kraken uses USD pairs
     ap.add_argument("--timeframe", default="1h")
     ap.add_argument("--quote", type=float, default=1000.0)
     ap.add_argument("--relearn-hours", type=int, default=48)
-    ap.add_argument("--lookback", type=int, default=1200)
-    ap.add_argument("--oos", type=int, default=300)
-    ap.add_argument("--samples", type=int, default=200)
+    ap.add_argument("--lookback", type=int, default=480)
+    ap.add_argument("--oos", type=int, default=120)
+    ap.add_argument("--samples", type=int, default=150)
     ap.add_argument("--min-pf", type=float, default=1.05)
     ap.add_argument("--max-drawdown", type=float, default=0.20)
-    ap.add_argument("--dry-run", action="store_true", help="synthetic data, no keys, no orders")
+    ap.add_argument("--dry-run", action="store_true", help="offline synthetic data")
     args = ap.parse_args()
 
     s = load_state()
     ppy = PPY.get(args.timeframe, 8760)
-    need = args.lookback + args.oos + 5
 
-    if args.dry_run:
-        ex, df = None, synthetic(n=need)
-    else:
-        ex, df = fetch_live(args.symbol, args.timeframe, min(need, 1000))
+    df = synthetic(n=args.lookback + args.oos + 20) if args.dry_run \
+        else fetch_data(args.symbol, args.timeframe)
+
+    # fit windows to whatever history we actually got
+    lookback, oos = args.lookback, args.oos
+    if len(df) < lookback + oos + 5:
+        oos = max(60, len(df) // 5)
+        lookback = max(120, len(df) - oos - 5)
 
     price = float(df["close"].iloc[-1])
     now = datetime.now(timezone.utc)
@@ -202,10 +200,10 @@ def main():
     # ---- re-learn on schedule (the adaptive part) ----
     due = s["last_relearn"] is None or \
         (now - datetime.fromisoformat(s["last_relearn"])).total_seconds() >= args.relearn_hours*3600
-    if due and len(df) >= args.lookback + args.oos:
+    if due and len(df) >= lookback + oos:
         rng = random.Random(int(now.timestamp()))
-        best = optimize(df.iloc[-(args.lookback+args.oos):-args.oos], ppy, args.samples, rng)
-        v = metrics(*backtest(df.iloc[-args.oos:], best["params"]), ppy) if best else None
+        best = optimize(df.iloc[-(lookback+oos):-oos], ppy, args.samples, rng)
+        v = metrics(*backtest(df.iloc[-oos:], best["params"]), ppy) if best else None
         armed = bool(v and v["total_return"] > 0 and v["n_trades"] >= 8
                      and v["profit_factor"] >= args.min_pf)
         s["last_relearn"] = now.isoformat()
@@ -214,7 +212,7 @@ def main():
             log("relearn", f"edge validated oos={v['total_return']*100:+.1f}% -> armed")
         else:
             if s["in_position"]:
-                close_position(s, price, "relearn-exit", now, args.dry_run, ex, args.symbol)
+                close_position(s, price, "relearn-exit", now)
             s["params"] = None
             log("relearn", f"no edge (oos={v['total_return']*100:.1f}%) -> CASH" if v else "no data -> CASH")
 
@@ -224,10 +222,10 @@ def main():
     if not s["halted"] and mtm <= s["peak"]*(1-args.max_drawdown):
         s["halted"] = True
         if s["in_position"]:
-            close_position(s, price, "kill-switch", now, args.dry_run, ex, args.symbol)
+            close_position(s, price, "kill-switch", now)
         log("HALT", f"drawdown limit hit at ${mtm:,.0f}; no new entries")
 
-    # ---- act on the latest candle ----
+    # ---- act on the latest candle (paper fills) ----
     if s["params"] and not s["halted"]:
         long_ok, exit_sig = compute_signals(df, s["params"])
         i = len(df)-1; p = s["params"]
@@ -235,11 +233,9 @@ def main():
             hit_sl = price <= s["entry"]*(1-p["stop_loss"])
             hit_tp = price >= s["entry"]*(1+p["take_profit"])
             if hit_sl or hit_tp or exit_sig[i]:
-                close_position(s, price, "stop" if hit_sl else "target" if hit_tp else "trend",
-                               now, args.dry_run, ex, args.symbol)
+                close_position(s, price, "stop" if hit_sl else "target" if hit_tp else "trend", now)
         elif long_ok[i]:
             s["qty"] = round(args.quote/price, 6)
-            if not args.dry_run: ex.create_market_buy_order(args.symbol, s["qty"])
             s["entry"], s["in_position"], s["entry_time"] = price, True, now.isoformat()
             log("buy", f"{s['qty']} @~{price:.2f} (~${args.quote:.0f})")
         else:

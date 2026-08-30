@@ -142,8 +142,8 @@ def main():
         f"![equity]({CHART})",
         "",
         "---",
-        "_Binance **testnet** (fake money). Equity is an internal estimate. "
-        "This bot adapts but does **not** guarantee profit — it's a learning run._",
+        "_Paper trading on **live Kraken prices** (simulated fills, fake money). "
+        "Equity is an internal estimate. This bot adapts but does **not** guarantee profit._",
     ]
 
     open(OUT, "w").write("\n".join(lines))
