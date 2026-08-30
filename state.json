@@ -9,14 +9,14 @@
     "stop_loss": 0.02,
     "take_profit": 0.12
   },
-  "in_position": true,
-  "entry": 35843.76639400428,
-  "qty": 0.027899,
-  "equity_est": 9322.392359402327,
-  "peak": 10000.0,
+  "in_position": false,
+  "entry": 0.0,
+  "qty": 0.0,
+  "equity_est": 10505.520139476002,
+  "peak": 10505.520139476002,
   "halted": false,
   "last_relearn": "2026-08-30T06:45:57.978656+00:00",
-  "entry_time": "2026-08-30T07:06:13.211107+00:00",
+  "entry_time": null,
   "start_equity": 10000.0,
-  "last_price": 35843.76639400428
+  "last_price": 78251.3
 }

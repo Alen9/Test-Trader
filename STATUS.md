@@ -1,17 +1,11 @@
-# Bot status  —  updated 2026-08-30 07:06 UTC
+# Bot status  —  updated 2026-08-30 07:12 UTC
 
-🟢 **In a trade**
+🟡 **Armed, waiting** for an entry signal
 
 ## Overall
-- Equity now: **$9,322.39**  (started $10,000.00)
-- Total since start: 🔴 **-6.78%**  _(testnet, estimated)_
-- Closed trades: **1**  |  wins: **0** (0%)  |  realized P/L: **$-677.61**
-
-## Open position
-- Size: **0.027899 units**  (~$1,000.01 deployed)
-- Entry price: **35,843.77**
-- Current price: **35,843.77**
-- Unrealized P/L: 🟢 **+0.00%**  ($0.00)
+- Equity now: **$10,505.52**  (started $10,000.00)
+- Total since start: 🟢 **+5.06%**  _(testnet, estimated)_
+- Closed trades: **2**  |  wins: **1** (50%)  |  realized P/L: **$505.52**
 
 ## Currently trading these settings
 ```json
@@ -30,10 +24,11 @@
 ## Recent trades
 | Exit time | Entry | Exit | P/L % | P/L $ | Why |
 |---|---|---|---|---|---|
+| 2026-08-30 07:12 | 35843.77 | 78251.30 | 🟢 +118.31% | +1183.13 | target |
 | 2026-08-30 06:56 | 124285.94 | 40069.23 | 🔴 -67.76% | -677.61 | stop |
 
 ## Equity chart
 ![equity](equity.png)
 
 ---
-_Binance **testnet** (fake money). Equity is an internal estimate. This bot adapts but does **not** guarantee profit — it's a learning run._
+_Paper trading on **live Kraken prices** (simulated fills, fake money). Equity is an internal estimate. This bot adapts but does **not** guarantee profit._
