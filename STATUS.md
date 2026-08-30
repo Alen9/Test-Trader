@@ -1,18 +1,18 @@
-# Bot status  —  updated 2026-08-30 14:24 UTC
+# Bot status  —  updated 2026-08-30 15:28 UTC
 
 🟢 **In a trade**
 
 ## Overall
-- Equity now: **$10,506.05**  (started $10,000.00)
-- Total since start: 🟢 **+5.06%**  _(paper, estimated)_
+- Equity now: **$10,505.43**  (started $10,000.00)
+- Total since start: 🟢 **+5.05%**  _(paper, estimated)_
 - Closed trades: **2**  |  wins: **1** (50%)  |  realized P/L: **$505.52**
 - Avg slippage vs mid: buy **+0.000%** / sell **+nan%**  _(over 1 fills)_
 
 ## Open position
 - Size: **0.01269256 units**  (~$1,000.00 deployed)
 - Entry price: **78,707.50**
-- Current price: **78,827.90**
-- Unrealized P/L: 🟢 **+0.05%**  ($0.53)
+- Current price: **78,778.90**
+- Unrealized P/L: 🔴 **-0.01%**  ($-0.09)
 
 ## Currently trading these settings
 ```json
