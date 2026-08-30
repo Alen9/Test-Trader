@@ -1,17 +1,17 @@
 """
 tick.py  -  ONE run of the adaptive bot. Designed for GitHub Actions.
 
-Runs entirely in the cloud with NO exchange keys: it pulls real prices from
-Kraken (which, unlike Binance, doesn't block data-center IPs) and PAPER-TRADES
-them - simulating fills internally. Still fake money, still adaptive; every
-trade is recorded so report.py can show it in STATUS.md.
+Keyless PAPER trading on real Kraken data, now with ORDER-BOOK fills:
+when it trades it pulls the live order book and "walks" it (buys into the asks,
+sells into the bids) so every fill includes real spread + slippage. It logs the
+slippage so you can see what execution costs you. Still fake money.
 
-Each run: load memory (state.json) -> fetch real candles -> re-learn on schedule
-(validate on unseen data) -> trade only with a validated edge, else hold cash ->
-drawdown kill switch -> record trade + equity -> save.
+Each run: load memory -> fetch candles + (at trade time) the live order book ->
+re-learn on schedule -> trade only with a validated edge -> drawdown kill switch
+-> record trade/fill/equity -> save.
 
-Test offline first:  python tick.py --dry-run
-This is a simulation. No real money is involved and profit is not guaranteed.
+Test offline:  python tick.py --dry-run
+Simulation only. No real money. Profit not guaranteed.
 """
 
 import argparse
@@ -23,10 +23,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-STATE_FILE = "state.json"
-LOG_FILE = "trades_log.csv"
-TRADES_FILE = "trades.csv"
-EQUITY_FILE = "equity_history.csv"
+STATE_FILE, LOG_FILE = "state.json", "trades_log.csv"
+TRADES_FILE, EQUITY_FILE, FILLS_FILE = "trades.csv", "equity_history.csv", "fills.csv"
 
 PARAM_SPACE = {
     "fast": [8, 12, 20, 30], "slow": [40, 60, 100, 150], "rsi_period": [14],
@@ -104,6 +102,44 @@ def optimize(df, ppy, samples, rng):
     return best
 
 
+# ------------------------- order-book fills -------------------------
+def fill_buy(asks, quote_amount):
+    """Walk the asks spending `quote_amount` USD -> (avg_price, qty)."""
+    spent, qty, last = 0.0, 0.0, (asks[-1][0] if asks else 0.0)
+    for price, amount in asks:
+        last = price
+        remaining = quote_amount - spent
+        if remaining <= 0: break
+        cost = price * amount
+        if cost >= remaining:
+            qty += remaining / price; spent += remaining
+            return spent / qty, qty
+        qty += amount; spent += cost
+    remaining = quote_amount - spent           # book too thin: fill rest at worst price
+    if remaining > 0 and last > 0:
+        qty += remaining / last; spent += remaining
+    return (spent / qty if qty else last), qty
+
+def fill_sell(bids, qty_to_sell):
+    """Walk the bids selling `qty_to_sell` -> (avg_price, usd_received)."""
+    got, sold, last = 0.0, 0.0, (bids[-1][0] if bids else 0.0)
+    for price, amount in bids:
+        last = price
+        take = min(amount, qty_to_sell - sold)
+        got += take * price; sold += take
+        if sold >= qty_to_sell:
+            return got / sold, got
+    rem = qty_to_sell - sold
+    if rem > 0 and last > 0:
+        got += rem * last; sold += rem
+    return (got / sold if sold else last), got
+
+def synth_book(price, levels=50, spread=0.0002, size=0.5):
+    asks = [[price*(1+spread*(k+1)), size] for k in range(levels)]
+    bids = [[price*(1-spread*(k+1)), size] for k in range(levels)]
+    return {"asks": asks, "bids": bids}
+
+
 # ------------------------- data -------------------------
 def synthetic(n=800, seed=None):
     rng = np.random.default_rng(seed)
@@ -115,25 +151,34 @@ def synthetic(n=800, seed=None):
     return pd.DataFrame({"open": o, "high": np.maximum(o, c)*(1+w),
                          "low": np.minimum(o, c)*(1-w), "close": c, "volume": 1.0}, index=idx)
 
-def fetch_data(symbol, timeframe):
-    """Real OHLCV from Kraken (public, no keys, not geoblocked on cloud IPs)."""
+def make_exchange():
     import ccxt
-    ex = ccxt.kraken({"enableRateLimit": True})
-    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe)   # Kraken returns up to ~720 bars
+    return ccxt.kraken({"enableRateLimit": True})
+
+def fetch_data(ex, symbol, timeframe):
+    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe)
     df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
     df.index = pd.to_datetime(df["ts"], unit="ms")
     return df[["open", "high", "low", "close", "volume"]].astype(float)
+
+def fetch_book(ex, symbol, price):
+    try:
+        b = ex.fetch_order_book(symbol, limit=50)
+        if b and b.get("asks") and b.get("bids"):
+            return b
+    except Exception as e:
+        print("order book fetch failed, using synthetic:", e)
+    return synth_book(price)
 
 
 # ------------------------- state, logging, records -------------------------
 def load_state():
     s = json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {}
-    s.setdefault("params", None); s.setdefault("in_position", False)
-    s.setdefault("entry", 0.0); s.setdefault("qty", 0.0)
-    s.setdefault("entry_time", None); s.setdefault("equity_est", 10_000.0)
-    s.setdefault("start_equity", 10_000.0); s.setdefault("peak", 10_000.0)
-    s.setdefault("halted", False); s.setdefault("last_relearn", None)
-    s.setdefault("last_price", 0.0)
+    for k, v in {"params": None, "in_position": False, "entry": 0.0, "qty": 0.0,
+                 "cost_basis": 0.0, "entry_time": None, "equity_est": 10_000.0,
+                 "start_equity": 10_000.0, "peak": 10_000.0, "halted": False,
+                 "last_relearn": None, "last_price": 0.0}.items():
+        s.setdefault(k, v)
     return s
 
 def save_state(s): json.dump(s, open(STATE_FILE, "w"), indent=2)
@@ -151,53 +196,77 @@ def record_trade(row):
         if new: f.write("entry_time,exit_time,entry_price,exit_price,qty,pnl_usdt,pnl_pct,reason\n")
         f.write(",".join(str(x) for x in row) + "\n")
 
+def record_fill(now, side, mid, fill, usd):
+    slip = (fill/mid - 1)*100 if side == "buy" else (mid/fill - 1)*100  # +% = worse than mid
+    new = not os.path.exists(FILLS_FILE)
+    with open(FILLS_FILE, "a") as f:
+        if new: f.write("time,side,mid,fill,slip_pct,usd\n")
+        f.write(f"{now.isoformat()},{side},{mid:.2f},{fill:.2f},{slip:.4f},{usd:.2f}\n")
+    return slip
+
 def record_equity(now, equity, price, in_pos):
     new = not os.path.exists(EQUITY_FILE)
     with open(EQUITY_FILE, "a") as f:
         if new: f.write("time,equity,price,in_position\n")
         f.write(f"{now.isoformat()},{equity:.2f},{price:.2f},{int(in_pos)}\n")
 
-def close_position(s, price, reason, now):
-    pnl = s["qty"] * (price - s["entry"])
-    pnl_pct = (price / s["entry"] - 1) * 100 if s["entry"] else 0.0
+def open_position(s, book, quote, fee, now):
+    mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
+    avg, qty = fill_buy(book["asks"], quote)
+    qty *= (1 - fee)                                   # fee taken in base
+    s["entry"], s["qty"], s["cost_basis"] = avg, round(qty, 8), quote
+    s["in_position"], s["entry_time"] = True, now.isoformat()
+    slip = record_fill(now, "buy", mid, avg, quote)
+    log("buy", f"{s['qty']} @~{avg:.2f} (mid {mid:.2f}, slip {slip:+.3f}%, ~${quote:.0f})")
+
+def close_position(s, book, reason, fee, now):
+    mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
+    avg, proceeds = fill_sell(book["bids"], s["qty"])
+    proceeds *= (1 - fee)
+    pnl = proceeds - s["cost_basis"]
+    pnl_pct = (proceeds / s["cost_basis"] - 1) * 100 if s["cost_basis"] else 0.0
     s["equity_est"] += pnl
+    slip = record_fill(now, "sell", mid, avg, proceeds)
     record_trade([s.get("entry_time"), now.isoformat(), round(s["entry"], 2),
-                  round(price, 2), s["qty"], round(pnl, 2), round(pnl_pct, 2), reason])
-    log("sell", f"@~{price:.2f} ({reason}) pnl {pnl_pct:+.2f}% (${pnl:+,.2f})")
-    s["in_position"], s["qty"], s["entry"], s["entry_time"] = False, 0.0, 0.0, None
+                  round(avg, 2), s["qty"], round(pnl, 2), round(pnl_pct, 2), reason])
+    log("sell", f"@~{avg:.2f} (mid {mid:.2f}, slip {slip:+.3f}%) pnl {pnl_pct:+.2f}% (${pnl:+,.2f}) [{reason}]")
+    s["in_position"], s["qty"], s["entry"], s["cost_basis"], s["entry_time"] = False, 0.0, 0.0, 0.0, None
 
 
 # ------------------------- one tick -------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbol", default="BTC/USD")     # Kraken uses USD pairs
+    ap.add_argument("--symbol", default="BTC/USD")
     ap.add_argument("--timeframe", default="1h")
     ap.add_argument("--quote", type=float, default=1000.0)
+    ap.add_argument("--fee", type=float, default=0.001, help="taker fee per side")
     ap.add_argument("--relearn-hours", type=int, default=48)
     ap.add_argument("--lookback", type=int, default=480)
     ap.add_argument("--oos", type=int, default=120)
     ap.add_argument("--samples", type=int, default=150)
     ap.add_argument("--min-pf", type=float, default=1.05)
     ap.add_argument("--max-drawdown", type=float, default=0.20)
-    ap.add_argument("--dry-run", action="store_true", help="offline synthetic data")
+    ap.add_argument("--dry-run", action="store_true", help="offline synthetic data + book")
     args = ap.parse_args()
 
     s = load_state()
     ppy = PPY.get(args.timeframe, 8760)
 
-    df = synthetic(n=args.lookback + args.oos + 20) if args.dry_run \
-        else fetch_data(args.symbol, args.timeframe)
+    if args.dry_run:
+        ex, df = None, synthetic(n=args.lookback + args.oos + 20)
+    else:
+        ex = make_exchange()
+        df = fetch_data(ex, args.symbol, args.timeframe)
 
-    # fit windows to whatever history we actually got
     lookback, oos = args.lookback, args.oos
     if len(df) < lookback + oos + 5:
-        oos = max(60, len(df) // 5)
-        lookback = max(120, len(df) - oos - 5)
+        oos = max(60, len(df) // 5); lookback = max(120, len(df) - oos - 5)
 
     price = float(df["close"].iloc[-1])
     now = datetime.now(timezone.utc)
+    book = synth_book(price) if args.dry_run else fetch_book(ex, args.symbol, price)
 
-    # ---- re-learn on schedule (the adaptive part) ----
+    # ---- re-learn on schedule ----
     due = s["last_relearn"] is None or \
         (now - datetime.fromisoformat(s["last_relearn"])).total_seconds() >= args.relearn_hours*3600
     if due and len(df) >= lookback + oos:
@@ -212,20 +281,20 @@ def main():
             log("relearn", f"edge validated oos={v['total_return']*100:+.1f}% -> armed")
         else:
             if s["in_position"]:
-                close_position(s, price, "relearn-exit", now)
+                close_position(s, book, "relearn-exit", args.fee, now)
             s["params"] = None
             log("relearn", f"no edge (oos={v['total_return']*100:.1f}%) -> CASH" if v else "no data -> CASH")
 
     # ---- drawdown kill switch ----
-    mtm = s["equity_est"] + (s["qty"]*(price-s["entry"]) if s["in_position"] else 0.0)
+    mtm = s["equity_est"] + (s["qty"]*price - s["cost_basis"] if s["in_position"] else 0.0)
     s["peak"] = max(s["peak"], mtm)
     if not s["halted"] and mtm <= s["peak"]*(1-args.max_drawdown):
         s["halted"] = True
         if s["in_position"]:
-            close_position(s, price, "kill-switch", now)
+            close_position(s, book, "kill-switch", args.fee, now)
         log("HALT", f"drawdown limit hit at ${mtm:,.0f}; no new entries")
 
-    # ---- act on the latest candle (paper fills) ----
+    # ---- act on the latest candle (order-book paper fills) ----
     if s["params"] and not s["halted"]:
         long_ok, exit_sig = compute_signals(df, s["params"])
         i = len(df)-1; p = s["params"]
@@ -233,11 +302,9 @@ def main():
             hit_sl = price <= s["entry"]*(1-p["stop_loss"])
             hit_tp = price >= s["entry"]*(1+p["take_profit"])
             if hit_sl or hit_tp or exit_sig[i]:
-                close_position(s, price, "stop" if hit_sl else "target" if hit_tp else "trend", now)
+                close_position(s, book, "stop" if hit_sl else "target" if hit_tp else "trend", args.fee, now)
         elif long_ok[i]:
-            s["qty"] = round(args.quote/price, 6)
-            s["entry"], s["in_position"], s["entry_time"] = price, True, now.isoformat()
-            log("buy", f"{s['qty']} @~{price:.2f} (~${args.quote:.0f})")
+            open_position(s, book, args.quote, args.fee, now)
         else:
             log("hold", f"armed, no entry signal (px {price:.2f})")
     else:
@@ -245,7 +312,7 @@ def main():
 
     # ---- record equity snapshot + save ----
     s["last_price"] = price
-    final_mtm = s["equity_est"] + (s["qty"]*(price-s["entry"]) if s["in_position"] else 0.0)
+    final_mtm = s["equity_est"] + (s["qty"]*price - s["cost_basis"] if s["in_position"] else 0.0)
     record_equity(now, final_mtm, price, s["in_position"])
     save_state(s)
 

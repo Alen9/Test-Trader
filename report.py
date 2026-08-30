@@ -78,8 +78,9 @@ def main():
     qty = s.get("qty", 0.0)
     params = s.get("params")
 
-    unreal = qty * (price - entry) if in_pos else 0.0
-    unreal_pct = (price / entry - 1) * 100 if (in_pos and entry) else 0.0
+    cost_basis = s.get("cost_basis", qty * entry) if in_pos else 0.0
+    unreal = (qty * price - cost_basis) if in_pos else 0.0
+    unreal_pct = (qty * price / cost_basis - 1) * 100 if (in_pos and cost_basis) else 0.0
     equity_now = equity_est + unreal
     total_pct = (equity_now / start - 1) * 100 if start else 0.0
 
@@ -105,6 +106,16 @@ def main():
     else:
         summary = "- Closed trades: **0**"
 
+    # execution quality (order-book slippage)
+    exec_line = None
+    if os.path.exists("fills.csv"):
+        fdf = pd.read_csv("fills.csv")
+        if not fdf.empty:
+            buy_slip = fdf[fdf["side"] == "buy"]["slip_pct"].mean()
+            sell_slip = fdf[fdf["side"] == "sell"]["slip_pct"].mean()
+            exec_line = (f"- Avg slippage vs mid: buy **{buy_slip:+.3f}%** / "
+                         f"sell **{sell_slip:+.3f}%**  _(over {len(fdf)} fills)_")
+
     arrow = "🟢" if total_pct >= 0 else "🔴"
     lines = [
         f"# Bot status  —  updated {now}",
@@ -113,13 +124,15 @@ def main():
         "",
         "## Overall",
         f"- Equity now: **{money(equity_now)}**  (started {money(start)})",
-        f"- Total since start: {arrow} **{total_pct:+.2f}%**  _(testnet, estimated)_",
+        f"- Total since start: {arrow} **{total_pct:+.2f}%**  _(paper, estimated)_",
         summary,
-        "",
     ]
+    if exec_line:
+        lines.append(exec_line)
+    lines.append("")
 
     if in_pos:
-        deployed = qty * entry
+        deployed = cost_basis
         pl_arrow = "🟢" if unreal_pct >= 0 else "🔴"
         lines += [
             "## Open position",
