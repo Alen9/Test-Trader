@@ -1,20 +1,14 @@
 """
 tick.py  -  ONE run of the adaptive bot. Designed for GitHub Actions.
 
-Each time it runs it:
-  1. loads its memory from state.json,
-  2. fetches recent candles (Binance TESTNET),
-  3. every `--relearn-hours` re-optimises + validates on unseen data (the "learning"),
-  4. only trades if that unseen slice showed a real edge, else holds cash,
-  5. respects a drawdown kill switch,
-  6. saves state.json and appends to trades_log.csv, then exits.
+Each run: load memory (state.json) -> fetch candles (Binance TESTNET) ->
+re-learn on schedule (validate on unseen data) -> trade only with a validated
+edge, else hold cash -> drawdown kill switch -> record trade + equity -> save.
 
-A GitHub Actions workflow calls this every hour, so the bot "runs on its own"
-in GitHub's cloud with your phone only used to edit files.
+Writes: state.json, trades_log.csv (raw events), trades.csv (closed trades),
+equity_history.csv (equity snapshots). report.py turns these into STATUS.md.
 
-Test safely first (no keys, no orders):
-    python tick.py --dry-run
-
+Test safely first (no keys, no orders):  python tick.py --dry-run
 TESTNET ONLY. Cannot touch real funds as written. Does not guarantee profit.
 """
 
@@ -29,8 +23,9 @@ import pandas as pd
 
 STATE_FILE = "state.json"
 LOG_FILE = "trades_log.csv"
+TRADES_FILE = "trades.csv"
+EQUITY_FILE = "equity_history.csv"
 
-# ---- search space (edit to taste) ----
 PARAM_SPACE = {
     "fast": [8, 12, 20, 30], "slow": [40, 60, 100, 150], "rsi_period": [14],
     "rsi_low": [40, 45, 50], "rsi_high": [70, 80, 90], "trend": [100, 200],
@@ -130,12 +125,19 @@ def fetch_live(symbol, timeframe, limit):
     return ex, df[["open", "high", "low", "close", "volume"]].astype(float)
 
 
-# ------------------------- state & logging -------------------------
+# ------------------------- state, logging, records -------------------------
 def load_state():
     if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
-    return {"params": None, "in_position": False, "entry": 0.0, "qty": 0.0,
-            "equity_est": 10_000.0, "peak": 10_000.0, "halted": False, "last_relearn": None}
+        s = json.load(open(STATE_FILE))
+    else:
+        s = {}
+    s.setdefault("params", None); s.setdefault("in_position", False)
+    s.setdefault("entry", 0.0); s.setdefault("qty", 0.0)
+    s.setdefault("entry_time", None); s.setdefault("equity_est", 10_000.0)
+    s.setdefault("start_equity", 10_000.0); s.setdefault("peak", 10_000.0)
+    s.setdefault("halted", False); s.setdefault("last_relearn", None)
+    s.setdefault("last_price", 0.0)
+    return s
 
 def save_state(s): json.dump(s, open(STATE_FILE, "w"), indent=2)
 
@@ -145,6 +147,29 @@ def log(event, detail):
         if new: f.write("time,event,detail\n")
         f.write(f"{datetime.now(timezone.utc).isoformat()},{event},{detail}\n")
     print(f"{event}: {detail}")
+
+def record_trade(row):
+    new = not os.path.exists(TRADES_FILE)
+    with open(TRADES_FILE, "a") as f:
+        if new: f.write("entry_time,exit_time,entry_price,exit_price,qty,pnl_usdt,pnl_pct,reason\n")
+        f.write(",".join(str(x) for x in row) + "\n")
+
+def record_equity(now, equity, price, in_pos):
+    new = not os.path.exists(EQUITY_FILE)
+    with open(EQUITY_FILE, "a") as f:
+        if new: f.write("time,equity,price,in_position\n")
+        f.write(f"{now.isoformat()},{equity:.2f},{price:.2f},{int(in_pos)}\n")
+
+def close_position(s, price, reason, now, dry_run, ex, symbol):
+    if not dry_run and ex is not None:
+        ex.create_market_sell_order(symbol, s["qty"])
+    pnl = s["qty"] * (price - s["entry"])
+    pnl_pct = (price / s["entry"] - 1) * 100 if s["entry"] else 0.0
+    s["equity_est"] += pnl
+    record_trade([s.get("entry_time"), now.isoformat(), round(s["entry"], 2),
+                  round(price, 2), s["qty"], round(pnl, 2), round(pnl_pct, 2), reason])
+    log("sell", f"@~{price:.2f} ({reason}) pnl {pnl_pct:+.2f}% (${pnl:+,.2f})")
+    s["in_position"], s["qty"], s["entry"], s["entry_time"] = False, 0.0, 0.0, None
 
 
 # ------------------------- one tick -------------------------
@@ -188,9 +213,9 @@ def main():
             s["params"] = best["params"]
             log("relearn", f"edge validated oos={v['total_return']*100:+.1f}% -> armed")
         else:
-            if s["in_position"] and not args.dry_run:
-                ex.create_market_sell_order(args.symbol, s["qty"])
-            s["in_position"], s["qty"], s["params"] = False, 0.0, None
+            if s["in_position"]:
+                close_position(s, price, "relearn-exit", now, args.dry_run, ex, args.symbol)
+            s["params"] = None
             log("relearn", f"no edge (oos={v['total_return']*100:.1f}%) -> CASH" if v else "no data -> CASH")
 
     # ---- drawdown kill switch ----
@@ -198,9 +223,8 @@ def main():
     s["peak"] = max(s["peak"], mtm)
     if not s["halted"] and mtm <= s["peak"]*(1-args.max_drawdown):
         s["halted"] = True
-        if s["in_position"] and not args.dry_run:
-            ex.create_market_sell_order(args.symbol, s["qty"])
-        s["in_position"], s["qty"] = False, 0.0
+        if s["in_position"]:
+            close_position(s, price, "kill-switch", now, args.dry_run, ex, args.symbol)
         log("HALT", f"drawdown limit hit at ${mtm:,.0f}; no new entries")
 
     # ---- act on the latest candle ----
@@ -211,20 +235,22 @@ def main():
             hit_sl = price <= s["entry"]*(1-p["stop_loss"])
             hit_tp = price >= s["entry"]*(1+p["take_profit"])
             if hit_sl or hit_tp or exit_sig[i]:
-                if not args.dry_run: ex.create_market_sell_order(args.symbol, s["qty"])
-                s["equity_est"] += s["qty"]*(price-s["entry"])
-                s["in_position"], s["qty"] = False, 0.0
-                log("sell", f"@~{price:.2f} ({'stop' if hit_sl else 'target' if hit_tp else 'trend'})")
+                close_position(s, price, "stop" if hit_sl else "target" if hit_tp else "trend",
+                               now, args.dry_run, ex, args.symbol)
         elif long_ok[i]:
             s["qty"] = round(args.quote/price, 6)
             if not args.dry_run: ex.create_market_buy_order(args.symbol, s["qty"])
-            s["entry"], s["in_position"] = price, True
-            log("buy", f"{s['qty']} @~{price:.2f}")
+            s["entry"], s["in_position"], s["entry_time"] = price, True, now.isoformat()
+            log("buy", f"{s['qty']} @~{price:.2f} (~${args.quote:.0f})")
         else:
             log("hold", f"armed, no entry signal (px {price:.2f})")
     else:
         log("cash", f"no validated edge or halted (px {price:.2f})")
 
+    # ---- record equity snapshot + save ----
+    s["last_price"] = price
+    final_mtm = s["equity_est"] + (s["qty"]*(price-s["entry"]) if s["in_position"] else 0.0)
+    record_equity(now, final_mtm, price, s["in_position"])
     save_state(s)
 
 
