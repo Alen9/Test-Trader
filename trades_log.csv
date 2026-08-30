@@ -7,3 +7,4 @@ time,event,detail
 2026-08-30T07:25:42.308409+00:00,hold,armed, no entry signal (px 78225.40)
 2026-08-30T11:39:37.746945+00:00,hold,armed, no entry signal (px 78161.70)
 2026-08-30T12:17:16.794471+00:00,hold,armed, no entry signal (px 78563.00)
+2026-08-30T13:07:02.954242+00:00,buy,0.01269256 @~78707.50 (mid 78707.45, slip +0.000%, ~$1000)
