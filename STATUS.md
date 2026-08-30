@@ -1,10 +1,10 @@
-# Bot status  —  updated 2026-08-30 07:12 UTC
+# Bot status  —  updated 2026-08-30 07:25 UTC
 
 🟡 **Armed, waiting** for an entry signal
 
 ## Overall
 - Equity now: **$10,505.52**  (started $10,000.00)
-- Total since start: 🟢 **+5.06%**  _(testnet, estimated)_
+- Total since start: 🟢 **+5.06%**  _(paper, estimated)_
 - Closed trades: **2**  |  wins: **1** (50%)  |  realized P/L: **$505.52**
 
 ## Currently trading these settings
