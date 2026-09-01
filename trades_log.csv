@@ -12,3 +12,6 @@ time,event,detail
 2026-08-31T10:02:53.908431+00:00,hold,armed, no entry signal (px 78410.50)
 2026-08-31T12:56:08.704687+00:00,hold,armed, no entry signal (px 77790.50)
 2026-08-31T16:43:37.869969+00:00,buy,0.01270642 @~78621.70 (mid 78621.65, slip +0.000%, ~$1000)
+2026-09-01T12:01:30.867774+00:00,sell,@~77980.80 (mid 77980.85, slip +0.000%) pnl -1.01% ($-10.13) [relearn-exit]
+2026-09-01T12:01:30.867817+00:00,relearn,no edge (oos=0.0%) -> CASH
+2026-09-01T12:01:30.867841+00:00,cash,no validated edge or halted (px 77980.90)

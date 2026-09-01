@@ -1,36 +1,17 @@
-# Bot status  —  updated 2026-09-01 06:31 UTC
+# Bot status  —  updated 2026-09-01 12:01 UTC
 
-🟢 **In a trade**
+💵 **In cash** — no validated edge right now
 
 ## Overall
-- Equity now: **$10,493.25**  (started $10,000.00)
-- Total since start: 🟢 **+4.93%**  _(paper, estimated)_
-- Closed trades: **3**  |  wins: **1** (33%)  |  realized P/L: **$490.83**
-- Avg slippage vs mid: buy **+0.000%** / sell **+0.004%**  _(over 3 fills)_
-
-## Open position
-- Size: **0.01270642 units**  (~$1,000.00 deployed)
-- Entry price: **78,621.70**
-- Current price: **78,890.50**
-- Unrealized P/L: 🟢 **+0.24%**  ($2.42)
-
-## Currently trading these settings
-```json
-{
-  "fast": 8,
-  "slow": 60,
-  "rsi_period": 14,
-  "rsi_low": 40,
-  "rsi_high": 90,
-  "trend": 100,
-  "stop_loss": 0.02,
-  "take_profit": 0.12
-}
-```
+- Equity now: **$10,480.70**  (started $10,000.00)
+- Total since start: 🟢 **+4.81%**  _(paper, estimated)_
+- Closed trades: **4**  |  wins: **1** (25%)  |  realized P/L: **$480.70**
+- Avg slippage vs mid: buy **+0.000%** / sell **+0.002%**  _(over 4 fills)_
 
 ## Recent trades
 | Exit time | Entry | Exit | P/L % | P/L $ | Why |
 |---|---|---|---|---|---|
+| 2026-09-01 12:01 | 78621.70 | 77980.80 | 🔴 -1.01% | -10.13 | relearn-exit |
 | 2026-08-31 03:29 | 78707.50 | 77706.77 | 🔴 -1.47% | -14.69 | trend |
 | 2026-08-30 07:12 | 35843.77 | 78251.30 | 🟢 +118.31% | +1183.13 | target |
 | 2026-08-30 06:56 | 124285.94 | 40069.23 | 🔴 -67.76% | -677.61 | stop |
