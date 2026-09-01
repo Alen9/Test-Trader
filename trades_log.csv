@@ -15,3 +15,4 @@ time,event,detail
 2026-09-01T12:01:30.867774+00:00,sell,@~77980.80 (mid 77980.85, slip +0.000%) pnl -1.01% ($-10.13) [relearn-exit]
 2026-09-01T12:01:30.867817+00:00,relearn,no edge (oos=0.0%) -> CASH
 2026-09-01T12:01:30.867841+00:00,cash,no validated edge or halted (px 77980.90)
+2026-09-01T16:39:22.335446+00:00,cash,no validated edge or halted (px 77488.50)
