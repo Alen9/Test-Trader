@@ -110,3 +110,5 @@ time,event,detail
 2026-09-13T14:36:20.549432+00:00,cash,no validated edge or halted (px 77121.90)
 2026-09-13T17:40:29.229046+00:00,cash,no validated edge or halted (px 77251.40)
 2026-09-13T19:49:00.849272+00:00,cash,no validated edge or halted (px 77223.00)
+2026-09-13T22:05:14.292536+00:00,relearn,no edge (oos=0.0%) -> CASH
+2026-09-13T22:05:14.292607+00:00,cash,no validated edge or halted (px 77054.40)
