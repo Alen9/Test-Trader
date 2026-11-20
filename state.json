@@ -6,9 +6,9 @@
   "equity_est": 10480.697595241625,
   "peak": 10509.271900140002,
   "halted": false,
-  "last_relearn": "2026-11-18T02:16:25.277162+00:00",
+  "last_relearn": "2026-11-20T07:37:15.196957+00:00",
   "entry_time": null,
   "start_equity": 10000.0,
-  "last_price": 62138.2,
+  "last_price": 61536.5,
   "cost_basis": 0.0
 }
